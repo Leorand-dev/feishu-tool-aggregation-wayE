@@ -1,0 +1,6 @@
+*.bak
+*.orig
+*.rej
+backup/
+.monitor.backup-*.mjs
+node_modules/
