@@ -1,0 +1,164 @@
+--- original.mjs
++++ patched.mjs
+@@ -1740,6 +1740,8 @@
+ 	let lastPartial = "";
+ 	let reasoningText = "";
+ 	let statusLine = "";
++	let aggregatedToolSummaryLine = "";
++	const aggregatedToolSummaryCounts = /* @__PURE__ */ new Map();
+ 	let snapshotBaseText = "";
+ 	let lastSnapshotTextLength = 0;
+ 	let hasStreamingFinalText = false;
+@@ -1758,12 +1760,16 @@
+ 	let idleRequestedForReply = false;
+ 	let replyLifecycleStateInitialized = false;
+ 	const pendingStreamingDeliveries = [];
++	const markVisibleReplySent = () => {
++		visibleReplySent = true;
++	};
+ 	const formatReasoningPrefix = (thinking) => {
+ 		if (!thinking) return "";
+ 		return `> 💭 **Thinking**\n${thinking.replace(/^(?:Reasoning:|Thinking\.{0,3})\s*/u, "").replace(/^_(.*)_$/gm, "$1").split("\n").map((line) => `> ${line}`).join("\n")}`;
+ 	};
+ 	const buildCombinedStreamText = (thinking, answer) => {
+-		return [[thinking ? formatReasoningPrefix(thinking) : "", answer].filter(Boolean).join("\n\n---\n\n"), statusLine].filter(Boolean).join("\n\n");
++		const parts = [aggregatedToolSummaryLine, [thinking ? formatReasoningPrefix(thinking) : "", answer].filter(Boolean).join("\n\n---\n\n")].filter(Boolean);
++		return [parts.join("\n\n"), statusLine].filter(Boolean).join("\n\n");
+ 	};
+ 	const flushStreamingCardUpdate = (combined) => {
+ 		partialUpdateQueue = queueFeishuStreamingUpdate({
+@@ -1842,6 +1848,8 @@
+ 		lastPartial = "";
+ 		reasoningText = "";
+ 		statusLine = "";
++		aggregatedToolSummaryCounts.clear();
++		aggregatedToolSummaryLine = "";
+ 		snapshotBaseText = "";
+ 		lastSnapshotTextLength = 0;
+ 		hasStreamingFinalText = false;
+@@ -1966,6 +1974,72 @@
+ 		flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
+ 		return false;
+ 	};
++	const parseCollapsibleToolSummary = (payload, info) => {
++		if (info?.kind !== "tool" || payload.isError === true) return void 0;
++		// Live gateway data: genuine tool-summary events carry an own `mediaUrls` key whose
++		// value is `undefined` (keys=[text,mediaUrls]); assistant prose carries only `text`
++		// (keys=[text]). Require the key to be present, ignoring its (empty) value, so
++		// narration is never miscounted as a tool.
++		if (!Object.prototype.hasOwnProperty.call(payload, "mediaUrls")) return void 0;
++		if (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0) return void 0;
++		if (payload.mediaUrl || payload.mediaUrlFull || payload.audioAsVoice === true) return void 0;
++		if (payload.channelData && Object.keys(payload.channelData).length > 0) return void 0;
++		if (Object.entries(payload).some(([key, value]) => key !== "text" && key !== "mediaUrls" && value !== void 0)) return void 0;
++		const text = typeof payload.text === "string" ? payload.text.trim() : "";
++		if (!text || /[\r\n]/.test(text) || text.length > 240) return void 0;
++		const match = text.match(/^(\S+)\s+(.+)$/u);
++		if (!match || !/^\p{Extended_Pictographic}/u.test(match[1])) return void 0;
++		const label = (match[2].split(":", 1)[0] ?? match[2]).trim();
++		if (!label || label.length > 80) return void 0;
++		return {
++			key: `${match[1]}\u0000${label.toLowerCase()}`,
++			icon: match[1],
++			label
++		};
++	};
++	const AGGREGATED_TOOL_SUMMARY_MAX_CHARS = 200;
++	const buildAggregatedToolSummaryLine = () => {
++		const groups = Array.from(aggregatedToolSummaryCounts.values());
++		if (groups.length === 0) return "";
++		const total = groups.reduce((sum, { count }) => sum + count, 0);
++		const segments = groups.map(({ icon, label, count }) => `${icon} ${label}${count > 1 ? ` \u00d7${count}` : ""}`);
++		const prefix = total > 1 ? `\u{1F6E0}\uFE0F ${total} tools: ` : "";
++		const budget = AGGREGATED_TOOL_SUMMARY_MAX_CHARS - prefix.length;
++		let rendered = "";
++		let shown = 0;
++		for (let i = 0; i < segments.length; i += 1) {
++			const candidate = rendered === "" ? segments[i] : `${rendered}, ${segments[i]}`;
++			const more = segments.length - i - 1;
++			const reservedTail = more > 0 ? `, \u2026+${more} more`.length : 0;
++			if (candidate.length + reservedTail > budget) break;
++			rendered = candidate;
++			shown = i + 1;
++		}
++		if (shown === 0) {
++			const hard = segments[0].slice(0, Math.max(0, budget - 8));
++			return `${prefix}${hard}\u2026${segments.length > 1 ? ` +${segments.length - 1} more` : ""}`;
++		}
++		const dropped = segments.length - shown;
++		return `${prefix}${rendered}${dropped > 0 ? `, \u2026+${dropped} more` : ""}`;
++	};
++	const aggregateCollapsibleToolSummary = async (entry) => {
++		if (!streamingEnabled || renderMode === "raw") return false;
++		startStreaming();
++		if (streamingStartPromise) await streamingStartPromise;
++		if (!streaming?.isActive()) return false;
++		markVisibleReplySent();
++		const current = aggregatedToolSummaryCounts.get(entry.key);
++		if (current) current.count += 1;
++		else aggregatedToolSummaryCounts.set(entry.key, {
++			icon: entry.icon,
++			label: entry.label,
++			count: 1
++		});
++		aggregatedToolSummaryLine = buildAggregatedToolSummaryLine();
++		statusLine = "";
++		flushStreamingCardUpdate(buildCombinedStreamText(reasoningText, streamText));
++		return true;
++	};
+ 	const sendChunkedTextReply = async (paramsLocal) => {
+ 		const header = paramsLocal.useCard ? resolveCardHeader(agentId, identity) : void 0;
+ 		const note = paramsLocal.useCard ? resolveCardNote(agentId, identity, responsePrefixContextProvider()) : void 0;
+@@ -2233,11 +2307,23 @@
+ 				idleRequestedForReply = false;
+ 				visibleReplySent = false;
+ 				replyOutcome = void 0;
++				aggregatedToolSummaryCounts.clear();
++				aggregatedToolSummaryLine = "";
+ 			}
+ 			if (previewStreamingEnabled && renderMode === "card") startStreaming();
+ 			await Promise.resolve(typingCallbacks?.onReplyStart?.());
+ 		},
+-		onIdle: () => queueIdleSideEffects(),
++		onIdle: () => {
++			// Hold the card open while a tool batch accumulates. Upstream closes on every
++			// idle, which leaves the next tool group no stream to reuse and makes the
++			// aggregator open a fresh card each time. Release as soon as the reply really
++			// starts arriving (text, reasoning, or a delivered final) or the turn reaches a
++			// terminal non-text outcome (silent/suppressed), so a tool-only turn cannot
++			// leave the held card open indefinitely.
++			const terminalQuiet = replyOutcome?.kind === "suppressed" || replyOutcome?.kind === "skipped" && replyOutcome.reason === "silent";
++			if (aggregatedToolSummaryLine !== "" && !streamText && !reasoningText && deliveredFinalTexts.size === 0 && !terminalQuiet) return;
++			queueIdleSideEffects();
++		},
+ 		onCleanup: () => {
+ 			typingCallbacks?.onCleanup?.();
+ 		}
+@@ -2265,6 +2351,11 @@
+ 				};
+ 			},
+ 			deliver: async (inputPayload, info) => {
++				// Prose streamed as kind:"tool" lacks the real tool-event shape (own mediaUrls).
++				// Never let it escape as a standalone bubble; it is narration, not a tool summary.
++				if (info?.kind === "tool" && inputPayload?.isError !== true && !Object.prototype.hasOwnProperty.call(inputPayload, "mediaUrls")) return noVisibleFeishuReplyDelivery;
++				const collapsibleToolSummary = parseCollapsibleToolSummary(inputPayload, info);
++				if (collapsibleToolSummary && await aggregateCollapsibleToolSummary(collapsibleToolSummary)) return noVisibleFeishuReplyDelivery;
+ 				const prepared = await renderFeishuReplyPayload(inputPayload, {
+ 					to: sendTarget,
+ 					identity,
+@@ -2292,12 +2383,13 @@
+ 					ttsSupplement
+ 				}));
+ 				const finalTextExceedsStreamingLimit = info?.kind === "final" && hasText && text.length > textChunkLimit;
+-				const cardRenderingRequested = renderMode === "card" || info?.kind === "block" && coreBlockStreamingEnabled && renderMode !== "raw" || renderMode === "auto" && shouldUseFeishuCard(text);
++				const midTurnBlockFold = info?.kind === "block" && renderMode !== "raw" && streamingEnabled && streaming?.isActive() === true && (aggregatedToolSummaryLine !== "" || aggregatedToolSummaryCounts.size > 0);
++				const cardRenderingRequested = renderMode === "card" || info?.kind === "block" && coreBlockStreamingEnabled && renderMode !== "raw" || renderMode === "auto" && shouldUseFeishuCard(text) || midTurnBlockFold;
+ 				const useStaticCard = hasText && cardRenderingRequested && withinCardTableLimit(text);
+ 				const useStreamingCard = hasText && streamingEnabled && !finalTextExceedsStreamingLimit && (info?.kind === "final" || cardRenderingRequested);
+ 				const skipTextForDuplicateFinal = !hasIndependentPresentation && info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
+ 				const shouldDeliverText = hasText && (!hasVoiceMedia || hasPresentationFallback) && !skipTextForDuplicateFinal;
+-				const shouldDiscardStreamingPreview = info?.kind === "final" && !(hasIndependentPresentation && payload.isError === true && hasStreamingFinalText) && (hasIndependentPresentation || finalTextExceedsStreamingLimit || hasMedia && (hasVoiceMedia && !shouldDeliverText && !ttsTextAlreadyVisible || skipTextForDuplicateFinal));
++				const shouldDiscardStreamingPreview = aggregatedToolSummaryLine === "" && info?.kind === "final" && !(hasIndependentPresentation && payload.isError === true && hasStreamingFinalText) && (hasIndependentPresentation || finalTextExceedsStreamingLimit || hasMedia && (hasVoiceMedia && !shouldDeliverText && !ttsTextAlreadyVisible || skipTextForDuplicateFinal));
+ 				const priorClosedStreamingSettlement = info?.kind === "final" && hasText && skipTextForDuplicateFinal ? claimClosedStreamingResult(void 0, text) : void 0;
+ 				if (!shouldDeliverText && !hasMedia && !presentationCard) {
+ 					if (priorClosedStreamingSettlement?.error !== void 0) throw toStringifiedError(priorClosedStreamingSettlement.error);

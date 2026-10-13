@@ -59,11 +59,13 @@ shape check fell through to a standalone reply. The discriminating signal is
 
 | plugin build | patch file | pristine sha256 | patched sha256 |
 | --- | --- | --- | --- |
-| `@openclaw/feishu` 2026.10.1 (OpenClaw 2026.10.1) | `patches/feishu-tool-aggregation-wayE.patch` | `9bbbd0c3…d2d9` | `8cbe577b…4644` |
+| `@openclaw/feishu` 2026.10.2 | `patches/2026.10.2/feishu-tool-aggregation-wayE.patch` | `8ae0e845…5eac` | `97ca5ce4…d867` |
+| `@openclaw/feishu` 2026.10.1 | `patches/2026.10.1/feishu-tool-aggregation-wayE.patch` | `9bbbd0c3…d2d9` | `8cbe577b…4644` |
 
-Verified on plugin build 2026.10.1. A different build is a different file: the
-installer refuses to apply unless the pristine hash matches, so re-derive the
-patch for any newer release.
+Each entry targets one exact plugin build. The installer selects the patch by
+matching the target's sha256, so a newer release is a new build: re-derive the
+patch for it (the 2026.10.2 port was re-anchored against that build's streaming
+refactor). A different build is refused rather than mis-applied.
 
 ## Install
 
@@ -74,20 +76,22 @@ TARGET=$(ls ~/.openclaw/npm/projects/*/node_modules/@openclaw/feishu/dist/.setup
 # then restart the gateway
 ```
 
-The installer backs up the original, applies the patch, and verifies the result
-hash. It is idempotent — running it twice reports `already patched`.
+The installer detects the target build by hash, backs up the original, applies
+the matching patch, and verifies the result hash. It is idempotent — running it
+twice reports `already patched`.
 
 ## Verify
 
 ```sh
-cd patches && sha256sum -c SHA256SUMS          # patch + both bundles intact
+cd patches && sha256sum -c SHA256SUMS                # all bundles + patches intact
 cd ../tests
-node test-wayD.mjs ../patches/patched.mjs      # live-shape discriminator (20)
-node test-wayC.mjs ../patches/patched.mjs      # mid-turn block fold   (11)
-node test-wayB.mjs ../patches/patched.mjs      # bounded summary line  (17)
-node exec-agg.mjs  ../patches/patched.mjs      # execution harness     (23)
-node test-idle-release.mjs ../patches/patched.mjs  # card-release    (11)
-node audit-agg.mjs ../patches/patched.mjs      # structural audit      (22)
+V=../patches/2026.10.2/patched.mjs                   # or 2026.10.1/patched.mjs
+node test-wayD.mjs $V      # live-shape discriminator (20)
+node test-wayC.mjs $V      # mid-turn block fold     (11)
+node test-wayB.mjs $V      # bounded summary line    (17)
+node exec-agg.mjs  $V      # execution harness       (23)
+node test-idle-release.mjs $V  # card-release        (11)
+node audit-agg.mjs $V      # structural audit        (22)
 ```
 
 All suites must pass. They read the bundle path from `argv[2]` (or
@@ -117,12 +121,17 @@ changed).
 ## Layout
 
 ```
-install.sh                                  idempotent installer
+install.sh                                  multi-version, idempotent installer
 patches/
-  original.mjs                              pristine plugin bundle
-  patched.mjs                               patched plugin bundle
-  feishu-tool-aggregation-wayE.patch        the 7-hunk unified diff
-  SHA256SUMS
+  2026.10.1/
+    original.mjs                            pristine plugin bundle
+    patched.mjs                             patched plugin bundle
+    feishu-tool-aggregation-wayE.patch      the 7-hunk unified diff
+  2026.10.2/
+    original.mjs
+    patched.mjs
+    feishu-tool-aggregation-wayE.patch
+  SHA256SUMS                                hashes for all of the above
 tests/
   test-wayD.mjs       live-shape discriminator
   test-wayC.mjs       mid-turn block fold
