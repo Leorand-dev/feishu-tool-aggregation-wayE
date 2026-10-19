@@ -19,6 +19,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 VERSIONS=(
   "2026.10.1 9bbbd0c3baa9227ebeb6f719a317f990357236db46e2fd46b9eda5e81d2bd2d9 8cbe577b511a5ea980169ceb205492c2bdff9afdfd8337026b5ade70cc1d4644 $HERE/patches/2026.10.1/feishu-tool-aggregation-wayE.patch"
   "2026.10.2 8ae0e845a1960f2aa7741b026e91bcaca2e9966478c1e43fa04faa9e9ebd5eac 97ca5ce404d940dc83b08a4fddf3c0dc16d52e4483a232fd97890ad5ad30d867 $HERE/patches/2026.10.2/feishu-tool-aggregation-wayE.patch"
+  "2026.10.5 72a0a198e31e71e4690e2b86296d53983863e99e8d3a0872ac4cbb83aefe3bfe 3e0b78196542859010b0ebbc841f920579ddd700ae18f6e243cb9b44581bc17a $HERE/patches/2026.10.5/feishu-tool-aggregation.patch"
 )
 
 TARGET="${1:-}"

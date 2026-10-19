@@ -59,6 +59,7 @@ shape check fell through to a standalone reply. The discriminating signal is
 
 | plugin build | patch file | pristine sha256 | patched sha256 |
 | --- | --- | --- | --- |
+| `@openclaw/feishu` 2026.10.5 | `patches/2026.10.5/feishu-tool-aggregation.patch` | `72a0a198…3bfe` | `3e0b7819…c17a` |
 | `@openclaw/feishu` 2026.10.2 | `patches/2026.10.2/feishu-tool-aggregation-wayE.patch` | `8ae0e845…5eac` | `97ca5ce4…d867` |
 | `@openclaw/feishu` 2026.10.1 | `patches/2026.10.1/feishu-tool-aggregation-wayE.patch` | `9bbbd0c3…d2d9` | `8cbe577b…4644` |
 
@@ -106,6 +107,85 @@ cp -p "$(dirname "$TARGET")/.monitor.backup-*.mjs" "$TARGET"
 
 Or reinstall the plugin to restore the pristine bundle.
 
+## 2026.10.5: waiting-only progress line
+
+The 2026.10.5 port changes what the card shows. Earlier ports folded per-tool
+lines into a summary such as `🛠️ 3 tools: 🛠️ Exec ×3`. That summary is gone; the
+card now carries a single bounded progress line:
+
+```
+⏳ 已执行 3 个工具，等待中…
+```
+
+Tool labels, per-tool counts and the "running X…" phase line are all removed.
+The chat surface is: no bubbles outside the card, one waiting line inside it.
+
+### Requires `verboseLevel: on`
+
+This is the one hard prerequisite. With `verboseLevel: off` tool events never
+reach the plugin's `deliver` / `onItemEvent` hooks, so nothing is aggregated and
+no progress line appears. Enable it per session:
+
+```sh
+openclaw gateway call sessions.patch \
+  --params '{"key":"agent:main:main","verboseLevel":"on"}'
+```
+
+That override is **per session**. New sessions fall back to the default.
+
+### What changed against 2026.10.2
+
+| area | 2026.10.2 | 2026.10.5 |
+| --- | --- | --- |
+| card body | `🛠️ N tools: 🛠️ Exec ×3` summary | `⏳ 已执行 N 个工具，等待中…` |
+| bare-label payloads | not recognised | `parseBareToolLabel` + `BARE_TOOL_LABELS` whitelist |
+| card/tool race | progress line could be dropped | backfilled once `session.start()` resolves |
+| idle hold | unconditional timer | `hasToolActivity` guard, 8s window, `unref()` |
+
+### Bare-label payloads
+
+Live gateway data shows tool events carry only the label, not an icon:
+
+```json
+{"keys":["text","mediaUrls"],"text":"Exec","mediaUrlsType":"undefined"}
+```
+
+The upstream emoji-prefixed parser (`/^(\S+)\s+(.+)$/u` plus
+`\p{Extended_Pictographic}`) never matches that shape, so aggregation silently
+produced nothing. The port adds `parseBareToolLabel`, gated by a whitelist so
+short prose is not miscounted as a tool:
+
+```
+exec bash shell read write edit apply_patch grep glob ls browser
+web_fetch web_search image view_image process sessions message
+task todo memory node canvas
+```
+
+**Known limitation:** tools outside that set (MCP servers, plugin-provided tools)
+are not counted. Add the label to `BARE_TOOL_LABELS` if you need them.
+
+### Card/tool race
+
+Local commands finish in well under a second while card creation takes seconds.
+The aggregator used to write its status line before the card existed, so fast
+batches showed no progress at all. The port backfills after creation:
+
+```js
+if (generation === activeStreamingGeneration && aggregatedToolSummaryCounts.size > 0) {
+  updateStreamingStatusLine(`⏳ 已执行 ${backfillTotal} 个工具，等待中…`, true);
+}
+```
+
+### Review fixes folded in
+
+| issue | fix |
+| --- | --- |
+| `onToolResult` returned `{visible:true}` but core never consumes it | removed (dead code) |
+| `markVisibleReplySent()` polluted delivery bookkeeping | removed |
+| bare-label regex accepted any letter string | replaced with whitelist |
+| 15s timer without `unref` | `unref?.()`, window reduced to 8s |
+| duplicated `midTurnBlockFold` condition | simplified |
+
 ## Upgrade warning
 
 Upgrading OpenClaw or `@openclaw/feishu` rewrites `dist/` and **silently reverts
@@ -131,6 +211,10 @@ patches/
     original.mjs
     patched.mjs
     feishu-tool-aggregation-wayE.patch
+  2026.10.5/
+    original.mjs                            pristine plugin bundle
+    patched.mjs                             patched plugin bundle
+    feishu-tool-aggregation.patch           the 9-hunk unified diff
   SHA256SUMS                                hashes for all of the above
 tests/
   test-wayD.mjs       live-shape discriminator
